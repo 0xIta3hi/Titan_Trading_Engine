@@ -1,27 +1,24 @@
 """
 Titan Trading Engine - Entry Point
 
-Phase 1: Event-driven core with regime detection and risk management.
+Phase 2: Real market data integration with MetaTrader 5.
 
 Demonstrates:
 1. EventBus pub/sub architecture.
 2. Real-time regime detection (trending vs mean reversion).
 3. Risk-managed order generation.
-4. Mock market data generation for testing.
+4. Live market data from MetaTrader 5.
 
 Run: python main.py
 """
 
 import asyncio
 import logging
-import random
-from datetime import datetime, timedelta
-from typing import AsyncGenerator
-
-import numpy as np
+from datetime import datetime
 
 from src.core.engine import EventBus, setup_event_loop
 from src.core.events import TickEvent, SignalEvent, OrderRequestEvent, RegimeEvent
+from src.core.feed import DataFeed
 from src.strategies.supervisor import Supervisor
 from src.strategies.math_utils import calculate_z_score
 from src.execution.risk import RiskManager
@@ -37,89 +34,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Test instruments
+# Trading instruments
 INSTRUMENTS = ["EURUSD", "USDJPY", "XAUUSD"]
 
 # Account parameters
-ACCOUNT_BALANCE = 100_000.0  # $100k
+ACCOUNT_BALANCE = 100_000.0  # $100k paper trading
 MAX_RISK_PER_TRADE = 500.0   # $500 per trade
 MAX_DAILY_RISK = 2_000.0     # $2k per day
 
-
-# ============================================================================
-# Mock Data Generator
-# ============================================================================
-
-
-async def generate_market_ticks(
-    symbol: str,
-    base_price: float,
-    duration_seconds: int = 30,
-    tick_interval_ms: int = 100,
-) -> AsyncGenerator[TickEvent, None]:
-    """
-    Generate synthetic market ticks for testing.
-
-    Simulates realistic price movement with:
-    - Trending periods (linear drift).
-    - Mean-reversion periods (random walk around mean).
-    - Spread simulation (bid/ask).
-
-    Args:
-        symbol: Currency pair (e.g., 'EURUSD').
-        base_price: Starting price.
-        duration_seconds: How long to generate ticks.
-        tick_interval_ms: Milliseconds between ticks.
-
-    Yields:
-        TickEvent objects.
-    """
-    current_price = base_price
-    trend = 0.00001  # Tiny uptrend
-    regime_switch_timer = 0
-    current_regime = "trending"  # trending or mean_reversion
-
-    start_time = datetime.utcnow()
-    elapsed = 0
-
-    while elapsed < duration_seconds:
-        # Simulate regime changes every 10 seconds
-        regime_switch_timer += 1
-        if regime_switch_timer > 100:
-            current_regime = "mean_reversion" if current_regime == "trending" else "trending"
-            regime_switch_timer = 0
-            logger.debug(f"{symbol}: Switching to {current_regime} regime")
-
-        # Generate price movement based on regime
-        if current_regime == "trending":
-            # Biased random walk with uptrend
-            price_change = np.random.normal(trend, 0.0005)
-        else:
-            # Mean-reverting: pull back to base
-            deviation = current_price - base_price
-            price_change = -deviation * 0.1 + np.random.normal(0, 0.0003)
-
-        current_price += price_change
-        current_price = max(current_price, base_price * 0.95)  # Floor
-
-        # Add bid/ask spread (2 pips for EURUSD, scaled for other pairs)
-        spread = 0.0002 if symbol == "EURUSD" else 0.0005
-        bid = current_price - spread / 2
-        ask = current_price + spread / 2
-
-        tick = TickEvent(
-            symbol=symbol,
-            timestamp=start_time + timedelta(milliseconds=elapsed * 1000),
-            bid=bid,
-            ask=ask,
-            volume=random.uniform(0.1, 10.0),
-        )
-
-        yield tick
-
-        await asyncio.sleep(tick_interval_ms / 1000.0)
-        elapsed += tick_interval_ms / 1000.0
-
+# Session duration
+SESSION_DURATION_SECONDS = 3600  # Run for 1 hour (can be changed)
 
 # ============================================================================
 # Signal Generation (Simple Regime-Based Strategy)
@@ -240,17 +164,18 @@ def setup_event_logging(bus: EventBus) -> None:
 
 async def main() -> None:
     """
-    Main async entry point: orchestrate the trading engine.
+    Main async entry point: orchestrate the trading engine with real MT5 data.
 
     Sets up:
     1. EventBus with uvloop.
-    2. Supervisors for regime detection.
-    3. RiskManager for position validation.
-    4. Simple strategy for signal generation.
-    5. Mock tick generators.
+    2. MetaTrader 5 data feed for real market prices.
+    3. Supervisors for regime detection.
+    4. RiskManager for position validation.
+    5. Simple strategy for signal generation.
+    6. Real-time monitoring and logging.
     """
     logger.info("=" * 70)
-    logger.info("Titan Trading Engine - Phase 1: Regime Detection & Risk Management")
+    logger.info("Titan Trading Engine - Phase 2: Real Market Integration (MT5)")
     logger.info("=" * 70)
 
     # Setup event loop for high performance
@@ -262,6 +187,11 @@ async def main() -> None:
 
     # Setup event logging
     setup_event_logging(bus)
+
+    # Initialize data feed (real MT5 prices)
+    logger.info(f"Connecting to MetaTrader 5...")
+    data_feed = DataFeed(bus, symbols=INSTRUMENTS)
+    logger.info(f"✓ DataFeed initialized for {INSTRUMENTS}")
 
     # Initialize supervisors (regime detectors)
     supervisors = {}
@@ -293,30 +223,25 @@ async def main() -> None:
         logger.info(f"✓ Strategy initialized for {symbol}")
 
     logger.info("=" * 70)
-    logger.info("Starting mock market simulation (30 seconds)...")
+    logger.info(f"Starting live market session ({SESSION_DURATION_SECONDS}s)...")
     logger.info("=" * 70)
 
-    # Generate mock ticks and process them
-    tick_generators = [
-        generate_market_ticks(symbol, base_price=100.0, duration_seconds=30, tick_interval_ms=150)
-        for symbol in INSTRUMENTS
-    ]
+    # Start the data feed
+    feed_task = asyncio.create_task(data_feed.start_stream())
 
-    # Process all tick streams concurrently
-    async def process_symbol_ticks(gen: AsyncGenerator[TickEvent, None]) -> None:
-        async for tick in gen:
-            await bus.publish(tick)
-
-    tasks = [process_symbol_ticks(gen) for gen in tick_generators]
-
+    # Run for specified duration
     try:
-        await asyncio.gather(*tasks)
-    except Exception as e:
-        logger.exception(f"Error during simulation: {e}")
+        await asyncio.sleep(SESSION_DURATION_SECONDS)
+    except KeyboardInterrupt:
+        logger.info("\n⏸ Session interrupted by user")
+    finally:
+        # Stop the feed
+        data_feed.stop()
+        await feed_task
 
     # Final summary
     logger.info("=" * 70)
-    logger.info("Simulation Complete - Final Metrics")
+    logger.info("Session Complete - Final Metrics")
     logger.info("=" * 70)
 
     for symbol, supervisor in supervisors.items():
