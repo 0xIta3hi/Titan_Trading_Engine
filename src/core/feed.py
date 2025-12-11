@@ -57,6 +57,13 @@ class DataFeed:
             )
         
         logger.info(f"MT5 initialized. Account: {mt5.account_info().login}")
+        
+        # Enable all symbols for tick data subscription
+        for symbol in symbols:
+            if not mt5.symbol_select(symbol, True):
+                logger.warning(f"Could not select symbol: {symbol}")
+            else:
+                logger.info(f"Subscribed to {symbol}")
 
     async def start_stream(self) -> None:
         """
