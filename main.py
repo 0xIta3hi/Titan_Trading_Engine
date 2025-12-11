@@ -25,6 +25,7 @@ from src.core.feed import DataFeed
 from src.strategies.supervisor import Supervisor
 from src.strategies.math_utils import calculate_z_score
 from src.strategies.mtf_analyzer import MTFAnalyzer
+from src.strategies.sr_detector import SRDetector
 from src.execution.risk import RiskManager
 from src.analytics.metrics import MarketAnalytics
 
@@ -57,26 +58,51 @@ SESSION_DURATION_SECONDS = 3600  # Run for 1 hour (can be changed)
 
 class SimpleStrategy:
     """
-    Strategy with Multi-Timeframe (MTF) Trend Filtering.
+    Strategy with Multi-Timeframe (MTF) Trend Filtering + Support/Resistance.
 
     When TRENDING regime: Generate BUY signals on uptrend, SELL on downtrend.
     When MEAN_REVERSION: Generate signals opposite to deviation direction.
     
-    **NEW:** Only take signals if the 1-Hour trend aligns with entry direction.
+    Filters:
+    1. MTF: Only take signals if 1H trend aligns with entry direction
+    2. S/R: For mean reversion, only trade near important price levels
     """
 
-    def __init__(self, bus: EventBus, symbol: str, mtf_analyzer: MTFAnalyzer) -> None:
+    def __init__(
+        self,
+        bus: EventBus,
+        symbol: str,
+        mtf_analyzer: MTFAnalyzer,
+        sr_detector: SRDetector,
+    ) -> None:
         self.bus = bus
         self.symbol = symbol
         self._last_z_score = 0.0
         self.mtf = mtf_analyzer
+        self.sr = sr_detector
+        self._price_history: list[float] = []  # For S/R detection
 
         # Listen to regime changes
         self.bus.subscribe(RegimeEvent, self._on_regime_event)
+        
+        # Track prices for S/R analysis
+        self.bus.subscribe(TickEvent, self._on_tick)
+
+    def _on_tick(self, event: TickEvent) -> None:
+        """Track price for S/R detection."""
+        if event.symbol != self.symbol:
+            return
+        
+        mid_price = (event.bid + event.ask) / 2
+        self._price_history.append(mid_price)
+        
+        # Keep only last 500 candles for S/R detection
+        if len(self._price_history) > 500:
+            self._price_history.pop(0)
 
     def _on_regime_event(self, event: RegimeEvent) -> None:
         """
-        Generate trading signals based on regime detection + MTF filter.
+        Generate trading signals based on regime detection + MTF + S/R filters.
 
         Args:
             event: RegimeEvent from supervisor.
@@ -108,7 +134,7 @@ class SimpleStrategy:
             logger.debug(f"{self.symbol}: Ranging market, skipping signal")
             return
 
-        # ✅ NEW: MTF TREND FILTER
+        # ✅ FILTER 1: MTF TREND FILTER
         # Only take the signal if the 1-Hour trend aligns with entry direction
         mtf_aligned = self.mtf.is_mtf_aligned(
             self.symbol,
@@ -124,6 +150,37 @@ class SimpleStrategy:
             )
             return  # Don't take the signal
 
+        # ✅ FILTER 2: SUPPORT & RESISTANCE (for Mean Reversion only)
+        # Mean reversion trades should bounce off important levels
+        if event.regime_type == "MEAN_REVERSION":
+            # Detect S/R levels if we have enough data
+            if len(self._price_history) >= 50:
+                sr_results = self.sr.detect_levels(
+                    self.symbol,
+                    self._price_history,
+                    window=10,
+                    min_strength=0.3,
+                )
+            
+            # For sells, check resistance; for buys, check support
+            sr_type = "RESISTANCE" if direction == "SELL" else "SUPPORT"
+            
+            current_price = self._price_history[-1] if self._price_history else 0.0
+            near_level = self.sr.is_near_sr(
+                self.symbol,
+                current_price,
+                sr_type=sr_type,
+                distance_pips=0.0015,
+            )
+            
+            if not near_level:
+                logger.info(
+                    f"{self.symbol}: ✗ Signal BLOCKED by S/R filter. "
+                    f"Price not near {sr_type} level (current: {current_price:.5f})"
+                )
+                return  # Don't take the signal
+
+        # ✅ Signal passed all filters - publish it
         # Create and publish signal
         signal = SignalEvent(
             symbol=event.symbol,
@@ -135,7 +192,7 @@ class SimpleStrategy:
         )
 
         logger.info(
-            f"{self.symbol}: Signal → {direction} ({confidence:.2%} confidence, {event.regime_type})"
+            f"{self.symbol}: ✓ Signal → {direction} ({confidence:.2%} confidence, {event.regime_type})"
         )
 
         import asyncio
@@ -261,6 +318,10 @@ async def main() -> None:
     mtf_analyzer = MTFAnalyzer(INSTRUMENTS)
     logger.info("✓ MTFAnalyzer initialized (M5 entries filtered by H1 trend)")
 
+    # Initialize Support & Resistance detector
+    sr_detector = SRDetector(pip_threshold=0.0010)
+    logger.info("✓ SRDetector initialized (mean reversion trades filtered by S/R levels)")
+
     # Subscribe to orders to record trades in analytics
     def record_order(event: OrderRequestEvent) -> None:
         analytics.record_trade(
@@ -275,12 +336,12 @@ async def main() -> None:
 
     bus.subscribe(OrderRequestEvent, record_order)
 
-    # Initialize strategies with MTF filtering
+    # Initialize strategies with MTF + S/R filtering
     strategies = {}
     for symbol in INSTRUMENTS:
-        strategy = SimpleStrategy(bus, symbol, mtf_analyzer)
+        strategy = SimpleStrategy(bus, symbol, mtf_analyzer, sr_detector)
         strategies[symbol] = strategy
-        logger.info(f"✓ Strategy initialized for {symbol} (with MTF filter)")
+        logger.info(f"✓ Strategy initialized for {symbol} (with MTF + S/R filters)")
 
     logger.info("=" * 70)
     logger.info(f"Starting live market session ({SESSION_DURATION_SECONDS}s)...")
