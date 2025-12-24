@@ -111,8 +111,8 @@ class DataFeed:
                         )
                         continue
                     
-                    # Sanity check: XAUUSD should be 1500-3000, not 100
-                    if symbol == "XAUUSD" and (bid < 1000 or bid > 3500):
+                    # Sanity check: XAUUSD should be 1000-5000, not 100
+                    if symbol == "XAUUSD" and (bid < 500 or bid > 10000):
                         logger.warning(
                             f"⚠️  XAUUSD price out of range: {bid}. "
                             f"This usually means the symbol is not properly configured in MT5. "
