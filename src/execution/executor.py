@@ -236,8 +236,25 @@ class OrderExecutor:
             self.current_balance -= event.risk_amount
         
         except Exception as e:
-            logger.error(f"Exception in order execution: {e}")
-            self._log_failed_order(event, str(e))
+            error_msg = str(e)
+            if "AutoTrading" in error_msg or "AutoTrading disabled" in error_msg:
+                logger.error(
+                    f"❌ ORDER FAILED: {event.symbol} {event.direction} {event.quantity:.4f} @ {event.price:.5f} "
+                    f"(Error: AutoTrading disabled)"
+                )
+                logger.warning(
+                    "\n⚠️  AUTOTRADING IS DISABLED IN MT5\n"
+                    "Fix this:\n"
+                    "1. Open MetaTrader 5\n"
+                    "2. Tools → Options → Expert Advisors → Enable AutoTrading ✓\n"
+                    "3. Restart the trading engine\n"
+                    "\nUntil you enable AutoTrading, trades will be simulated."
+                )
+                # Fall back to simulation mode
+                self._simulate_trade_execution(event)
+            else:
+                logger.error(f"Exception in order execution: {e}")
+                self._log_failed_order(event, error_msg)
     
     def _simulate_trade_execution(self, event: OrderRequestEvent) -> None:
         """

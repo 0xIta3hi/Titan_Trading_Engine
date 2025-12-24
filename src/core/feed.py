@@ -99,6 +99,27 @@ class DataFeed:
                         logger.warning(f"No tick data available for {symbol}")
                         continue
                     
+                    # Validate price is reasonable (sanity check)
+                    bid = tick_data.bid
+                    ask = tick_data.ask
+                    
+                    # Reject obviously wrong prices
+                    if bid <= 0 or ask <= 0:
+                        logger.warning(
+                            f"Invalid prices for {symbol}: BID={bid}, ASK={ask}. "
+                            f"Check if symbol is properly selected in MT5."
+                        )
+                        continue
+                    
+                    # Sanity check: XAUUSD should be 1500-3000, not 100
+                    if symbol == "XAUUSD" and (bid < 1000 or bid > 3500):
+                        logger.warning(
+                            f"⚠️  XAUUSD price out of range: {bid}. "
+                            f"This usually means the symbol is not properly configured in MT5. "
+                            f"Using mock data for now."
+                        )
+                        continue
+                    
                     # Skip if price hasn't changed (avoid duplicate events)
                     # time_msc is milliseconds since epoch
                     if tick_data.time_msc == self._last_tick_time[symbol]:
