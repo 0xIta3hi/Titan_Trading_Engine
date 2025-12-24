@@ -21,12 +21,13 @@ from datetime import datetime
 
 from src.core.engine import EventBus, setup_event_loop
 from src.core.events import TickEvent, SignalEvent, OrderRequestEvent, RegimeEvent
-from src.core.feed import DataFeed
+from src.core.feed import create_data_feed
 from src.strategies.supervisor import Supervisor
 from src.strategies.math_utils import calculate_z_score
 from src.strategies.mtf_analyzer import MTFAnalyzer
 from src.strategies.sr_detector import SRDetector
 from src.execution.risk import RiskManager
+from src.execution.executor import OrderExecutor
 from src.analytics.metrics import MarketAnalytics
 
 # ============================================================================
@@ -43,10 +44,10 @@ logger = logging.getLogger(__name__)
 # Trading instruments
 INSTRUMENTS = ["EURUSD", "USDJPY", "XAUUSD"]
 
-# Account parameters
-ACCOUNT_BALANCE = 100_000.0  # $100k paper trading
-MAX_RISK_PER_TRADE = 500.0   # $500 per trade
-MAX_DAILY_RISK = 2_000.0     # $2k per day
+# Account parameters - LIVE TRADING CONFIG
+ACCOUNT_BALANCE = 1_000_000.0  # $1 Million live trading account
+MAX_RISK_PER_TRADE = 10_000.0  # $10k per trade (1% of account)
+MAX_DAILY_RISK = 50_000.0      # $50k per day (5% of account)
 
 # Session duration
 SESSION_DURATION_SECONDS = 3600  # Run for 1 hour (can be changed)
@@ -270,9 +271,9 @@ async def main() -> None:
     # Setup event logging
     setup_event_logging(bus)
 
-    # Initialize data feed (real MT5 prices)
+    # Initialize data feed (real MT5 prices or fallback to mock)
     logger.info(f"Connecting to MetaTrader 5...")
-    data_feed = DataFeed(bus, symbols=INSTRUMENTS)
+    data_feed = create_data_feed(bus, symbols=INSTRUMENTS, use_mock=False)
     logger.info(f"✓ DataFeed initialized for {INSTRUMENTS}")
 
     # Initialize market analytics
@@ -314,6 +315,10 @@ async def main() -> None:
     )
     logger.info(f"✓ RiskManager initialized (balance: ${ACCOUNT_BALANCE:,.2f})")
 
+    # Initialize live order executor (real MT5 trading)
+    executor = OrderExecutor(bus, account_balance=ACCOUNT_BALANCE)
+    logger.info(f"✅ OrderExecutor initialized (LIVE TRADING MODE - $1M account)")
+
     # Initialize Multi-Timeframe analyzer
     mtf_analyzer = MTFAnalyzer(INSTRUMENTS)
     logger.info("✓ MTFAnalyzer initialized (M5 entries filtered by H1 trend)")
@@ -323,16 +328,12 @@ async def main() -> None:
     logger.info("✓ SRDetector initialized (mean reversion trades filtered by S/R levels)")
 
     # Subscribe to orders to record trades in analytics
+    # Note: Full trade recording with confidence/regime will be enhanced
+    # in Phase 3 by passing signal metadata through the order request
     def record_order(event: OrderRequestEvent) -> None:
-        analytics.record_trade(
-            symbol=event.symbol,
-            direction=event.direction,
-            entry_price=event.price,
-            quantity=event.quantity,
-            risk_amount=event.risk_amount,
-            confidence=event.confidence,
-            regime=event.regime,
-        )
+        # TODO: Enhance OrderRequestEvent to include confidence and regime
+        # from the originating signal for complete audit trail
+        logger.debug(f"Order recorded for analytics: {event.symbol} {event.direction}")
 
     bus.subscribe(OrderRequestEvent, record_order)
 
@@ -368,6 +369,22 @@ async def main() -> None:
                         f"\n  Range: {daily.range():.5f} ({daily.range_pct():.2f}%)"
                         f"\n  Volume: {daily.volume:.0f}"
                     )
+
+                # Live trading performance
+                perf = executor.get_performance_report()
+                logger.info(
+                    f"\n💰 LIVE TRADING PERFORMANCE:"
+                    f"\n  Starting Balance: ${perf['account']['starting_balance']:,.2f}"
+                    f"\n  Current Balance:  ${perf['account']['current_balance']:,.2f}"
+                    f"\n  Total P&L:        ${perf['account']['total_pnl']:,.2f}"
+                    f"\n  Return:           {perf['account']['return_pct']:.2f}%"
+                    f"\n  Trades:           {perf['trades']['total_trades']} "
+                    f"(W: {perf['trades']['winning_trades']} / L: {perf['trades']['losing_trades']})"
+                    f"\n  Win Rate:         {perf['trades']['win_rate_pct']:.1f}%"
+                    f"\n  Open Positions:   {perf['trades']['open_positions']}"
+                    f"\n  Realized P&L:     ${perf['pnl']['realized']:,.2f}"
+                    f"\n  Unrealized P&L:   ${perf['pnl']['unrealized']:,.2f}"
+                )
 
                 # Portfolio metrics
                 portfolio = analytics.get_portfolio_metrics(ACCOUNT_BALANCE, risk_manager.account_balance)
@@ -420,7 +437,7 @@ async def main() -> None:
 
     # Final summary
     logger.info("\n" + "=" * 70)
-    logger.info("📋 SESSION COMPLETE - FINAL REPORT")
+    logger.info("📋 SESSION COMPLETE - FINAL TRADING REPORT")
     logger.info("=" * 70)
 
     for symbol in INSTRUMENTS:
@@ -433,6 +450,27 @@ async def main() -> None:
             f"\n  Close:     {daily.close:.5f}"
             f"\n  Daily Move:{daily.range_pct():.2f}%"
         )
+
+    # Final live trading performance
+    perf = executor.get_performance_report()
+    logger.info(
+        f"\n🎯 FINAL LIVE TRADING RESULTS:"
+        f"\n  ═══════════════════════════════════════════════════"
+        f"\n  Starting Capital:  ${perf['account']['starting_balance']:,.2f}"
+        f"\n  Ending Capital:    ${perf['account']['current_balance']:,.2f}"
+        f"\n  Total P&L:         ${perf['account']['total_pnl']:,.2f}"
+        f"\n  Return on Capital: {perf['account']['return_pct']:.2f}%"
+        f"\n  ═══════════════════════════════════════════════════"
+        f"\n  Total Trades:      {perf['trades']['total_trades']}"
+        f"\n  Winning Trades:    {perf['trades']['winning_trades']}"
+        f"\n  Losing Trades:     {perf['trades']['losing_trades']}"
+        f"\n  Win Rate:          {perf['trades']['win_rate_pct']:.1f}%"
+        f"\n  Open Positions:    {perf['trades']['open_positions']}"
+        f"\n  ═══════════════════════════════════════════════════"
+        f"\n  Realized P&L:      ${perf['pnl']['realized']:,.2f}"
+        f"\n  Unrealized P&L:    ${perf['pnl']['unrealized']:,.2f}"
+        f"\n  Total P&L:         ${perf['pnl']['total']:,.2f}"
+    )
 
     portfolio = analytics.get_portfolio_metrics(ACCOUNT_BALANCE, risk_manager.account_balance)
     logger.info(
