@@ -117,6 +117,9 @@ class SimpleStrategy:
         )
 
         self._last_z_score = event.z_score
+        
+        # Get current price early (available for both TRENDING and MEAN_REVERSION)
+        current_price = self._price_history[-1] if self._price_history else 0.0
 
         # Generate signals based on regime
         if event.regime_type == "TRENDING":
@@ -166,7 +169,6 @@ class SimpleStrategy:
             # For sells, check resistance; for buys, check support
             sr_type = "RESISTANCE" if direction == "SELL" else "SUPPORT"
             
-            current_price = self._price_history[-1] if self._price_history else 0.0
             near_level = self.sr.is_near_sr(
                 self.symbol,
                 current_price,
@@ -189,7 +191,7 @@ class SimpleStrategy:
             direction=direction,  # type: ignore
             confidence=confidence,
             regime=event.regime_type,
-            price=100.0,  # Placeholder; actual price from tick
+            price=current_price,  # Use actual tick price, not placeholder
         )
 
         logger.info(

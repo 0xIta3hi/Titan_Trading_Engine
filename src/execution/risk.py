@@ -154,9 +154,10 @@ class RiskManager:
         # Generate unique order ID from signal
         signal_id = self._hash_signal(signal)
 
-        # Simple position sizing: risk_amount / volatility proxy
-        # For now, use fixed quantity scaling
-        quantity = risk_amount / (signal.price * 0.01)  # 1% of price as unit risk
+        # Simple position sizing: risk_amount / price (standard risk-per-lot)
+        # Quantity = Risk Amount / Price (gives us lot size)
+        # MT5 validates volume is between 0.01 and max allowed per symbol
+        quantity = max(0.01, risk_amount / signal.price)  # Minimum 0.01 lots
 
         order = OrderRequestEvent(
             symbol=signal.symbol,

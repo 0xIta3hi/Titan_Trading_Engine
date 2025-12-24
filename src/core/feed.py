@@ -141,7 +141,7 @@ class DataFeed:
                     await self.bus.publish(tick_event)
 
             except Exception as e:
-                logger.error(f"Feed Error: {e}")
+                logger.error(f"Feed Error:")
                 # Backoff on error to avoid rapid retries
                 await asyncio.sleep(1.0)
             
